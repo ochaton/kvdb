@@ -13,7 +13,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type writer struct {
@@ -21,10 +23,29 @@ type writer struct {
 	dir      string
 	file     *os.File
 	incoming chan message
+	mu       sync.RWMutex // guards channel
+	closed   bool
+	done     chan error
+}
+
+// NewWriter creates a new writer
+func newWriter(path string) *writer {
+	return &writer{
+		dir:      path,
+		incoming: make(chan message, 100),
+		mu:       sync.RWMutex{},
+	}
 }
 
 // Send message to the writer
 func (w *writer) Send(msg message) error {
+	w.mu.RLock()
+	if w.closed {
+		w.mu.RUnlock()
+		return ErrClosed
+	}
+	w.mu.RUnlock()
+
 	cb := msg.Callback()
 	if cb == nil {
 		return errors.New("callback is nil")
@@ -34,19 +55,74 @@ func (w *writer) Send(msg message) error {
 	return <-cb
 }
 
-// Write operation to the writer
+// Request writer to write operation into jlog
 func (w *writer) Write(op *operation) error {
 	return w.Send(newWriteMessage(op))
 }
 
-// Rotate jlog file
+// Request writer to rotate current jlog file
 func (w *writer) Rotate() error {
 	return w.Send(newRotateMessage())
 }
 
-// Compact jlog files
+// Request writer to compact jlogs
 func (w *writer) Compact(snap map[string]space, lsn uint64) error {
 	return w.Send(newCompactMessage(snap, lsn))
+}
+
+// Close writer
+func (w *writer) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return ErrClosed
+	}
+
+	close(w.incoming)
+	// await for all messages to be processed
+	if w.done == nil {
+		return nil
+	}
+	return <-w.done
+}
+
+// GetLSN returns current LSN
+func (w *writer) GetLSN() uint64 {
+	return w.getLSN()
+}
+
+// Load all jlogs from the directory and apply them to the given function
+// Sets LSN of the last applied operation to writer
+func (w *writer) Load(applyTxn func(*operation) (uint64, error)) error {
+	jlogs, err := w.list(w.dir)
+	if err != nil {
+		return err
+	}
+
+	for _, jlog := range jlogs {
+		lsn, err := w.loadJlog(jlog, applyTxn)
+		if err != nil {
+			return err
+		}
+		w.setLSN(lsn)
+	}
+
+	return nil
+}
+
+// Start writer
+func (w *writer) Start() error {
+	if err := w.rotate(); err != nil {
+		return err
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.done = make(chan error, 1)
+
+	go w.work()
+	return nil
 }
 
 func lsn2str(lsn uint64) string {
@@ -55,15 +131,6 @@ func lsn2str(lsn uint64) string {
 
 func str2lsn(s string) (uint64, error) {
 	return strconv.ParseUint(s, 10, 64)
-}
-
-func (w *writer) Start() error {
-	if err := w.rotate(); err != nil {
-		return err
-	}
-
-	go w.work()
-	return nil
 }
 
 func (w *writer) list(dir string) ([]os.DirEntry, error) {
@@ -151,7 +218,7 @@ func (w *writer) loadJlog(jlog os.DirEntry, applyTxn func(*operation) (uint64, e
 	}
 	defer file.Close()
 
-	rs := WithReaderStats(file)
+	rs := withReaderStats(file)
 	lsn, err = w.loadFrom(rs, applyTxn)
 	if err != nil {
 		return
@@ -160,23 +227,6 @@ func (w *writer) loadJlog(jlog os.DirEntry, applyTxn func(*operation) (uint64, e
 	bytesPerSec := rs.HumanStats()
 	log.Printf("loadFile %s: %s\n", file.Name(), bytesPerSec)
 	return
-}
-
-func (w *writer) Load(applyTxn func(*operation) (uint64, error)) error {
-	jlogs, err := w.list(w.dir)
-	if err != nil {
-		return err
-	}
-
-	for _, jlog := range jlogs {
-		lsn, err := w.loadJlog(jlog, applyTxn)
-		if err != nil {
-			return err
-		}
-		w.setLSN(lsn)
-	}
-
-	return nil
 }
 
 func (w *writer) compact(msg *messageCompact) error {
@@ -277,7 +327,7 @@ func (w *writer) compactJlog(jlog os.DirEntry, snap map[string]space, output *os
 		return err
 	}
 	defer file.Close()
-	rs := WithReaderStats(file)
+	rs := withReaderStats(file)
 
 	rn := 0
 	wr := 0
@@ -331,15 +381,6 @@ func (w *writer) compactImpl(output *os.File, jlogs []os.DirEntry, msg *messageC
 	}
 
 	return nil
-}
-
-func (w *writer) Close() error {
-	close(w.incoming)
-	return nil
-}
-
-func (w *writer) LSN() uint64 {
-	return w.getLSN()
 }
 
 func (w *writer) rotate() error {
@@ -408,8 +449,11 @@ func (w *writer) work() {
 			}
 		}
 	}
-	w.file.Sync()
-	w.file.Close()
+	errs := w.file.Sync()
+	errc := w.file.Close()
+
+	w.done <- errors.Join(errs, errc)
+	close(w.done)
 }
 
 func (w *writer) write(op *operation) error {
@@ -439,4 +483,162 @@ func (w *writer) writeTo(op *operation, file *os.File) error {
 		return err
 	}
 	return nil
+}
+
+/******************************************************************************
+ * Message
+ * Message is a structure that is used to send messages to the writer.
+ */
+
+type messageAction uint
+
+const (
+	messageActionNone    messageAction = 0
+	messageActionWrite   messageAction = 1
+	messageActionRotate  messageAction = 2
+	messageActionCompact messageAction = 3
+)
+
+type message interface {
+	Action() messageAction
+	Callback() chan error
+	Op() *operation
+}
+
+type messageBase struct {
+	callback chan error
+}
+
+func newMessage() messageBase {
+	return messageBase{
+		callback: make(chan error, 1),
+	}
+}
+
+func (m messageBase) Callback() chan error {
+	return m.callback
+}
+
+func (m messageBase) Action() messageAction {
+	return messageActionNone
+}
+
+func (m messageBase) Op() *operation {
+	return nil
+}
+
+type messageWrite struct {
+	messageBase
+	op *operation
+}
+
+func (m *messageWrite) Action() messageAction {
+	return messageActionWrite
+}
+
+func (m *messageWrite) Op() *operation {
+	return m.op
+}
+
+func newWriteMessage(op *operation) message {
+	if op == nil {
+		return nil
+	}
+	return &messageWrite{
+		messageBase: newMessage(),
+		op:          op,
+	}
+}
+
+type messageRotate struct {
+	messageBase
+}
+
+func (m *messageRotate) Action() messageAction {
+	return messageActionRotate
+}
+
+func newRotateMessage() message {
+	return &messageRotate{
+		messageBase: newMessage(),
+	}
+}
+
+type messageCompact struct {
+	messageBase
+	lsn  uint64
+	snap map[string]space
+}
+
+func (m *messageCompact) Action() messageAction {
+	return messageActionCompact
+}
+
+func (m *messageCompact) Snap() map[string]space {
+	return m.snap
+}
+
+func (m *messageCompact) LSN() uint64 {
+	return m.lsn
+}
+
+func newCompactMessage(snap map[string]space, lsn uint64) message {
+	if snap == nil {
+		return nil
+	}
+	return &messageCompact{
+		messageBase: newMessage(),
+		snap:        snap,
+		lsn:         lsn,
+	}
+}
+
+/******************************************************************************
+ * ReaderStats
+ */
+
+type readerStats struct {
+	r        io.Reader
+	bytes    int
+	readTime time.Duration
+}
+
+// withReaderStats returns a new ReaderStats wrapping the given reader
+func withReaderStats(r io.Reader) *readerStats {
+	return &readerStats{r: r}
+}
+
+// Read reads from the underlying reader and records statistics
+func (rs *readerStats) Read(p []byte) (int, error) {
+	start := time.Now()
+	n, err := rs.r.Read(p)
+	rs.readTime += time.Since(start)
+	rs.bytes += n
+	return n, err
+}
+
+// Stats returns calls/sec and bytes/sec based only on time spent reading
+func (rs *readerStats) Stats() (bytesPerSec float64) {
+	seconds := rs.readTime.Seconds()
+	if seconds == 0 {
+		return 0
+	}
+	return float64(rs.bytes) / seconds
+}
+
+func (rs *readerStats) HumanStats() (bytes string) {
+	bytesPerSec := rs.Stats()
+	bytes = humanize(bytesPerSec)
+	return
+}
+
+func humanize(bytesPerSec float64) string {
+	if bytesPerSec < 1024 {
+		return fmt.Sprintf("%.2f B/s", bytesPerSec)
+	} else if bytesPerSec < 1024*1024 {
+		return fmt.Sprintf("%.2f KB/s", bytesPerSec/1024)
+	} else if bytesPerSec < 1024*1024*1024 {
+		return fmt.Sprintf("%.2f MB/s", bytesPerSec/(1024*1024))
+	}
+	return fmt.Sprintf("%.2f GB/s", bytesPerSec/(1024*1024*1024))
 }

@@ -4,26 +4,23 @@ import (
 	"errors"
 	"log"
 	"sync"
-
-	"golang.org/x/exp/maps"
 )
 
-type KVDB struct {
+type T struct {
 	mu     sync.RWMutex
 	spaces map[string]space
 	closed bool
 	wr     *writer
 }
 
-func Open(path string) (*KVDB, error) {
-	db := &KVDB{}
+// Open opens a new database at the given path.
+// If the database does not exist, it will be created.
+func Open(path string) (*T, error) {
+	db := &T{}
 	db.spaces = make(map[string]space)
 
 	var err error
-	db.wr = &writer{
-		dir:      path,
-		incoming: make(chan message, 100),
-	}
+	db.wr = newWriter(path)
 
 	if err = db.wr.Load(db.applyTxn); err != nil {
 		_ = db.wr.Close()
@@ -49,40 +46,50 @@ func Open(path string) (*KVDB, error) {
 	return db, nil
 }
 
-type Stats struct {
-	Alive    uint64
-	Dead     uint64
-	AlivePct float64
-}
-
-func (db *KVDB) totalStats() Stats {
-	total := Stats{}
-	for _, v := range db.spaces {
-		total.Alive += v.Alive()
-		total.Dead += v.Dead()
+// Space returns the space with the given name.
+// If the space does not exist, it returns nil.
+func (db *T) Space(name string) Space {
+	sp := db.space(name, false)
+	if sp == nil {
+		return nil
 	}
-	total.AlivePct = float64(total.Alive+1) / float64(total.Alive+1+total.Dead)
-	return total
+	return newImpl(*sp)
 }
 
-func (db *KVDB) TotalStats() Stats {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+// NewSpace creates a new space with the given name.
+// or returns the existing space if it already exists.
+func (db *T) NewSpace(name string) Space {
+	sp := db.space(name, true)
+	return newImpl(*sp)
+}
 
-	return db.totalStats()
+// Close closes the database and releases all resources.
+func (db *T) Close() (err error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
+	err = db.wr.Close()
+
+	db.closed = true
+	db.spaces = nil
+	return
 }
 
 // Runs the compaction process on all spaces.
 // db will be blocked for creating mvcc snapshot
-// and then will be unlocked
-func (db *KVDB) Compact() error {
+// and then will be unlocked before requesting compaction
+func (db *T) Compact() error {
 	db.mu.Lock()
 	if db.closed {
 		db.mu.Unlock()
 		return ErrClosed
 	}
 
-	lsn := db.wr.LSN()
+	lsn := db.wr.GetLSN()
 	if lsn == 0 {
 		db.mu.Unlock()
 		return nil
@@ -95,7 +102,7 @@ func (db *KVDB) Compact() error {
 		snap[k] = sp.View()
 	}
 	db.mu.Unlock()
-	defer maps.Clear(snap)
+	defer clear(snap)
 
 	// now we can compact all spaces
 	err := db.wr.Compact(snap, lsn)
@@ -121,22 +128,15 @@ func (db *KVDB) Compact() error {
 	return nil
 }
 
-func (db *KVDB) Close() (err error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+// TotalStats returns the total statistics of all spaces.
+func (db *T) TotalStats() Stats {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
 
-	if db.closed {
-		return ErrClosed
-	}
-
-	db.wr.Close()
-
-	db.closed = true
-	db.spaces = nil
-	return
+	return db.totalStats()
 }
 
-func (db *KVDB) applyTxn(txn *operation) (uint64, error) {
+func (db *T) applyTxn(txn *operation) (uint64, error) {
 	txn.Record.LSN = txn.LSN
 	switch txn.Op {
 	case set:
@@ -154,7 +154,7 @@ func (db *KVDB) applyTxn(txn *operation) (uint64, error) {
 	return txn.LSN, nil
 }
 
-func (db *KVDB) space(name string, create bool) *space {
+func (db *T) space(name string, create bool) *space {
 	db.mu.RLock()
 	sp, ok := db.spaces[name]
 	db.mu.RUnlock()
@@ -173,18 +173,22 @@ func (db *KVDB) space(name string, create bool) *space {
 	return &sp
 }
 
-func (db *KVDB) Space(name string) Space {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+/******************
+ * Statistics
+ */
 
-	sp, ok := db.spaces[name]
-	if !ok {
-		return nil
-	}
-	return newImpl(sp)
+type Stats struct {
+	Alive    uint64
+	Dead     uint64
+	AlivePct float64
 }
 
-func (db *KVDB) NewSpace(name string) Space {
-	sp := db.space(name, true)
-	return newImpl(*sp)
+func (db *T) totalStats() Stats {
+	total := Stats{}
+	for _, v := range db.spaces {
+		total.Alive += v.Alive()
+		total.Dead += v.Dead()
+	}
+	total.AlivePct = float64(total.Alive+1) / float64(total.Alive+1+total.Dead)
+	return total
 }

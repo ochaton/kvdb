@@ -2,11 +2,12 @@ package main_test
 
 import (
 	"fmt"
+	"log"
 	"strconv"
+	"sync"
 	"testing"
 
-	"github.com/ochaton/kvdb/package/kvdb"
-	"golang.org/x/sync/errgroup"
+	"github.com/ochaton/kvdb"
 )
 
 type TestUser struct {
@@ -66,38 +67,63 @@ func TestKVDBConcurrent(t *testing.T) {
 	alice := TestUser{Name: "Alice", Age: 30}
 	bob := TestUser{Name: "Bob", Age: 28}
 
-	eg := errgroup.Group{}
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+	errs := make(chan error, 2)
 
-	eg.Go(func() error {
-		if err := users.Set([]byte(alice.Name), alice); err != nil {
-			return fmt.Errorf("failed to set user: %v", err)
+	go func() {
+		var err error
+		defer wg.Done()
+		defer func() {
+			log.Printf("errs < err (1): %v", err)
+			errs <- err
+		}()
+
+		if err = users.Set([]byte(alice.Name), alice); err != nil {
+			err = fmt.Errorf("failed to set user: %v", err)
+			return
 		}
 		var ret TestUser
-		if err := users.Get([]byte(alice.Name), &ret); err != nil {
-			return fmt.Errorf("failed to get user: %v", err)
+		if err = users.Get([]byte(alice.Name), &ret); err != nil {
+			err = fmt.Errorf("failed to get user: %v", err)
+			return
 		}
 		if ret.Name != alice.Name || ret.Age != alice.Age {
-			return fmt.Errorf("got %v, want %v", ret, alice)
+			err = fmt.Errorf("got %v, want %v", ret, alice)
+			return
 		}
-		return nil
-	})
+	}()
 
-	eg.Go(func() error {
-		if err := users.Set([]byte(bob.Name), bob); err != nil {
-			return fmt.Errorf("failed to set user: %v", err)
+	go func() {
+		var err error
+		defer wg.Done()
+		defer func() {
+			log.Printf("errs < err (2): %v", err)
+			errs <- err
+		}()
+		if err = users.Set([]byte(bob.Name), bob); err != nil {
+			err = fmt.Errorf("failed to set user: %v", err)
+			return
 		}
 		var ret TestUser
-		if err := users.Get([]byte(bob.Name), &ret); err != nil {
-			return fmt.Errorf("failed to get user: %v", err)
+		if err = users.Get([]byte(bob.Name), &ret); err != nil {
+			err = fmt.Errorf("failed to get user: %v", err)
+			return
 		}
 		if ret.Name != bob.Name || ret.Age != bob.Age {
-			return fmt.Errorf("got %v, want %v", ret, bob)
+			err = fmt.Errorf("got %v, want %v", ret, bob)
+			return
 		}
-		return nil
-	})
+	}()
 
-	if err := eg.Wait(); err != nil {
-		t.Error(err)
+	wg.Wait()
+	limit := 2
+	for limit > 0 {
+		err := <-errs
+		if err != nil {
+			t.Error(err)
+		}
+		limit--
 	}
 
 	// Check that Bob and Alice are in the database

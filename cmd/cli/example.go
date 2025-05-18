@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/ochaton/kvdb/package/kvdb"
+	"github.com/ochaton/kvdb"
 )
 
 type User struct {
@@ -21,6 +21,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer db.Close()
 
 	users := db.NewSpace("users")
 	bob := User{Name: "Bob", Age: 28}
