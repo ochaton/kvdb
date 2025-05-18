@@ -1,0 +1,8 @@
+.vscode
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+.env
