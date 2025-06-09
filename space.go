@@ -193,18 +193,21 @@ type Space interface {
 
 // implementation of public interface of space
 type impl struct {
-	inner   space
-	bufPool sync.Pool
+	inner space
+}
+
+var _ Space = (*impl)(nil)
+
+// common buffer pool
+var bufPool = &sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(nil)
+	},
 }
 
 func newImpl(sp space) *impl {
 	return &impl{
 		inner: sp,
-		bufPool: sync.Pool{
-			New: func() any {
-				return bytes.NewBuffer(nil)
-			},
-		},
 	}
 }
 
@@ -228,8 +231,8 @@ func (s *impl) Get(key []byte, into any) error {
 }
 
 func (s *impl) copy(r *record, into any) error {
-	buf := s.bufPool.Get().(*bytes.Buffer)
-	defer s.bufPool.Put(buf)
+	buf := bufPool.Get().(*bytes.Buffer)
+	defer bufPool.Put(buf)
 
 	buf.Reset()
 	enc := json.NewEncoder(buf)

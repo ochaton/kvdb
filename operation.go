@@ -17,8 +17,11 @@ type operation struct {
 type oType string
 
 const (
-	set oType = "set"
-	del oType = "del"
+	set      oType = "set"
+	del      oType = "del"
+	begin    oType = "begin"
+	commit   oType = "commit"
+	rollback oType = "rollback"
 )
 
 func (o oType) MarshalJSON() ([]byte, error) {
@@ -27,6 +30,12 @@ func (o oType) MarshalJSON() ([]byte, error) {
 		return []byte(`"set"`), nil
 	case del:
 		return []byte(`"del"`), nil
+	case begin:
+		return []byte(`"begin"`), nil
+	case commit:
+		return []byte(`"commit"`), nil
+	case rollback:
+		return []byte(`"rollback"`), nil
 	default:
 		return nil, errors.New("unknown operation type")
 	}
@@ -42,6 +51,12 @@ func (o *oType) UnmarshalJSON(data []byte) error {
 		*o = set
 	case "del":
 		*o = del
+	case "begin":
+		*o = begin
+	case "commit":
+		*o = commit
+	case "rollback":
+		*o = rollback
 	default:
 		return errors.New("unknown operation type")
 	}

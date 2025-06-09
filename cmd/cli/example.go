@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/ochaton/kvdb"
 )
@@ -26,6 +27,29 @@ func main() {
 	users := db.NewSpace("users")
 	bob := User{Name: "Bob", Age: 28}
 
+	// Guarantee that the space is created
+	err = db.Update(func(space kvdb.GetSpace) (err error) {
+		users := space("users")
+
+		if err = users.Set(bob.Key(), bob); err != nil {
+			return
+		}
+
+		var bob User
+		if err = users.Get([]byte("Bob"), &bob); err != nil {
+			return
+		}
+
+		bob.Age += 1
+		if err = users.Set(bob.Key(), bob); err != nil {
+			return
+		}
+		return nil
+	})
+	if err != nil {
+		log.Fatalln(err)
+	}
+
 	for range 10 {
 		if err = users.Set(bob.Key(), bob); err != nil {
 			panic(err)
@@ -36,6 +60,5 @@ func main() {
 			panic(err)
 		}
 		fmt.Printf("User: %s, Age: %d\n", ret.Name, ret.Age)
-		fmt.Printf("Header: %+#v\n", ret)
 	}
 }

@@ -13,6 +13,8 @@ type T struct {
 	wr     *writer
 }
 
+type GetSpace func(name string) Space
+
 // Open opens a new database at the given path.
 // If the database does not exist, it will be created.
 func Open(path string) (*T, error) {
@@ -46,6 +48,14 @@ func Open(path string) (*T, error) {
 	return db, nil
 }
 
+func (db *T) spaceNoLock(name string) Space {
+	sp, ok := db.spaces[name]
+	if !ok {
+		return nil
+	}
+	return newImpl(sp)
+}
+
 // Space returns the space with the given name.
 // If the space does not exist, it returns nil.
 func (db *T) Space(name string) Space {
@@ -61,6 +71,18 @@ func (db *T) Space(name string) Space {
 func (db *T) NewSpace(name string) Space {
 	sp := db.space(name, true)
 	return newImpl(*sp)
+}
+
+func (db *T) Update(txn func(f GetSpace) error) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return txn(db.spaceNoLock)
+}
+
+func (db *T) View(txn func(f GetSpace) error) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return txn(db.spaceNoLock)
 }
 
 // Close closes the database and releases all resources.
@@ -128,25 +150,15 @@ func (db *T) Compact() error {
 	return nil
 }
 
-// TotalStats returns the total statistics of all spaces.
-func (db *T) TotalStats() Stats {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	return db.totalStats()
-}
-
 func (db *T) applyTxn(txn *operation) (uint64, error) {
 	txn.Record.LSN = txn.LSN
 	switch txn.Op {
 	case set:
 		db.space(txn.Record.Tag, true).TreeSet(txn.Record)
 	case del:
-		space := db.space(txn.Record.Tag, false)
-		if space == nil {
-			break
+		if space := db.space(txn.Record.Tag, false); space != nil {
+			space.TreeDel(txn.Record)
 		}
-		space.TreeDel(txn.Record)
 	default:
 		return 0, errors.New("unknown operation type")
 	}
@@ -171,24 +183,4 @@ func (db *T) space(name string, create bool) *space {
 	sp = newSpace(name, db.wr)
 	db.spaces[name] = sp
 	return &sp
-}
-
-/******************
- * Statistics
- */
-
-type Stats struct {
-	Alive    uint64
-	Dead     uint64
-	AlivePct float64
-}
-
-func (db *T) totalStats() Stats {
-	total := Stats{}
-	for _, v := range db.spaces {
-		total.Alive += v.Alive()
-		total.Dead += v.Dead()
-	}
-	total.AlivePct = float64(total.Alive+1) / float64(total.Alive+1+total.Dead)
-	return total
 }
