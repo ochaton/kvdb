@@ -7,28 +7,26 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ochaton/kvdb"
+	"github.com/ochaton/kvdb/test/helpers"
 )
 
-type TestUser struct {
-	Name string `json:"name"`
-	Age  int    `json:"age"`
-}
-
 func TestKVDB(t *testing.T) {
-	db, err := kvdb.Open(".kvdb")
+	db, err := helpers.SetupDB(helpers.DbPath, true)
 	if err != nil {
-		t.Fatalf("failed to open db: %v", err)
+		t.Fatalf("%v", err)
 	}
 
-	users := db.NewSpace("users")
-	alice := TestUser{Name: "Alice", Age: 30}
+	users, err := db.NewSpace("users")
+	if err != nil {
+		t.Fatalf("failed to create space users: %v", err)
+	}
+	alice := helpers.TestUser{Name: "Alice", Age: 30}
 
 	if err := users.Set([]byte(alice.Name), alice); err != nil {
 		t.Fatalf("failed to set user: %v", err)
 	}
 
-	var ret TestUser
+	var ret helpers.TestUser
 	if err := users.Get([]byte(alice.Name), &ret); err != nil {
 		t.Fatalf("failed to get user: %v", err)
 	}
@@ -58,14 +56,17 @@ func TestKVDB(t *testing.T) {
 }
 
 func TestKVDBConcurrent(t *testing.T) {
-	db, err := kvdb.Open(".kvdb")
+	db, err := helpers.SetupDB(helpers.DbPath, true)
 	if err != nil {
-		t.Fatalf("failed to open db: %v", err)
+		t.Fatalf("%v", err)
 	}
 
-	users := db.NewSpace("users")
-	alice := TestUser{Name: "Alice", Age: 30}
-	bob := TestUser{Name: "Bob", Age: 28}
+	users, err := db.NewSpace("users")
+	if err != nil {
+		t.Fatalf("failed to create space users: %v", err)
+	}
+	alice := helpers.TestUser{Name: "Alice", Age: 30}
+	bob := helpers.TestUser{Name: "Bob", Age: 28}
 
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
@@ -83,7 +84,7 @@ func TestKVDBConcurrent(t *testing.T) {
 			err = fmt.Errorf("failed to set user: %v", err)
 			return
 		}
-		var ret TestUser
+		var ret helpers.TestUser
 		if err = users.Get([]byte(alice.Name), &ret); err != nil {
 			err = fmt.Errorf("failed to get user: %v", err)
 			return
@@ -105,7 +106,7 @@ func TestKVDBConcurrent(t *testing.T) {
 			err = fmt.Errorf("failed to set user: %v", err)
 			return
 		}
-		var ret TestUser
+		var ret helpers.TestUser
 		if err = users.Get([]byte(bob.Name), &ret); err != nil {
 			err = fmt.Errorf("failed to get user: %v", err)
 			return
@@ -127,7 +128,7 @@ func TestKVDBConcurrent(t *testing.T) {
 	}
 
 	// Check that Bob and Alice are in the database
-	var retAlice, retBob TestUser
+	var retAlice, retBob helpers.TestUser
 	if err := users.Get([]byte(alice.Name), &retAlice); err != nil {
 		t.Fatalf("failed to get user: %v", err)
 	}
@@ -154,12 +155,15 @@ func (m *Metric) Key() []byte {
 }
 
 func BenchmarkWrite(b *testing.B) {
-	db, err := kvdb.Open(".kvdb")
+	db, err := helpers.SetupDB(helpers.DbPath, true)
 	if err != nil {
-		b.Fatalf("failed to open db: %v", err)
+		b.Fatalf("%v", err)
 	}
 
-	metrics := db.NewSpace("metrics")
+	metrics, err := db.NewSpace("metrics")
+	if err != nil {
+		b.Fatalf("failed to create space metrics: %v", err)
+	}
 	time := int64(0)
 
 	b.ResetTimer()

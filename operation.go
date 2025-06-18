@@ -3,6 +3,7 @@ package kvdb
 import (
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // operation is what actually stored in the log file
@@ -17,18 +18,47 @@ type operation struct {
 type oType string
 
 const (
-	set      oType = "set"
-	del      oType = "del"
-	begin    oType = "begin"
-	commit   oType = "commit"
-	rollback oType = "rollback"
+	OPERATION_SET oType = "set"
+	OPERATION_DEL oType = "del"
+	begin         oType = "begin"
+	commit        oType = "commit"
+	rollback      oType = "rollback"
 )
+
+func newOperation(r *record, op oType) operation {
+	return operation{
+		Op:     op,
+		Time:   time.Now().Unix(),
+		Record: r,
+	}
+}
+
+func operationsFromRecords(records []*record, op oType) []*operation {
+	operations := make([]*operation, 0, len(records))
+	for _, r := range records {
+		operations = append(operations, &operation{
+			LSN:    r.LSN,
+			Op:     op,
+			Time:   r.Time,
+			Record: r,
+		})
+	}
+	return operations
+}
+
+func (op *operation) upgradeRecord() {
+	if op.Record == nil {
+		return
+	}
+	op.Record.LSN = op.LSN
+	op.Record.Time = op.Time
+}
 
 func (o oType) MarshalJSON() ([]byte, error) {
 	switch o {
-	case set:
+	case OPERATION_SET:
 		return []byte(`"set"`), nil
-	case del:
+	case OPERATION_DEL:
 		return []byte(`"del"`), nil
 	case begin:
 		return []byte(`"begin"`), nil
@@ -48,9 +78,9 @@ func (o *oType) UnmarshalJSON(data []byte) error {
 	}
 	switch s {
 	case "set":
-		*o = set
+		*o = OPERATION_SET
 	case "del":
-		*o = del
+		*o = OPERATION_DEL
 	case "begin":
 		*o = begin
 	case "commit":

@@ -24,7 +24,10 @@ func main() {
 	}
 	defer db.Close()
 
-	users := db.NewSpace("users")
+	users, err := db.NewSpace("users")
+	if err != nil {
+		log.Fatalln(err)
+	}
 	bob := User{Name: "Bob", Age: 28}
 
 	// Guarantee that the space is created
