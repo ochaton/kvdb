@@ -56,14 +56,15 @@ func (w *writer) Load(applyTxn func(*operation) (uint64, error)) error {
 		return err
 	}
 
-	var lsn uint64
 	for _, filePath := range filePathes {
-		lsn, err = loadDataFile(filePath, applyTxn)
+		lsn, err := loadDataFile(filePath, applyTxn)
 		if err != nil {
 			return err
 		}
+		if lsn > w.getLSN() {
+			w.setLSN(lsn)
+		}
 	}
-	w.setLSN(lsn)
 	w.status = loaded
 
 	return nil

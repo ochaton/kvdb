@@ -111,7 +111,7 @@ func loadDataFile(filePath string, applyTxn func(*operation) (uint64, error)) (u
 		return 0, err
 	}
 
-	log.Printf("loadFile %s: %s\n", fh.Name(), rs.HumanStats())
+	log.Printf("loadFile %s (lsn=%d): %s\n", fh.Name(), lsn, rs.HumanStats())
 	return lsn, nil
 }
 
