@@ -1,8 +1,6 @@
 package main_test
 
 import (
-	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"testing"
@@ -44,24 +42,9 @@ func TestKVDBLoading(t *testing.T) {
 {"lsn":12,"op":"set","time":1750280676,"record":{"tag":"users","key":"Alice-8","value":{"name":"Alice-8","age":8}}}
 `,
 	}
-	if err := os.MkdirAll(helpers.DbPath, 0755); err != nil {
-		t.Fatalf("Failed to setup data: failed to create dir %v", err)
-	}
 
-	for fileName, content := range data {
-		filePath := fmt.Sprintf("%s/%s", helpers.DbPath, fileName)
-		fh, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0644)
-		if err != nil {
-			t.Fatalf("Failed to setup data: can not open file %v", err)
-		}
-
-		if _, err := fh.Write([]byte(content)); err != nil {
-			t.Fatalf("Failed to setup data: can not write to file %v", err)
-		}
-
-		if err := fh.Close(); err != nil {
-			t.Fatalf("Failed to setup data: can not close file %v", err)
-		}
+	if err := helpers.SetupDataFiles(helpers.DbPath, data); err != nil {
+		t.Fatalf("%v", err)
 	}
 
 	db, err := helpers.SetupDB(helpers.DbPath, false)
@@ -98,4 +81,32 @@ func TestKVDBLoading(t *testing.T) {
 	if !reflect.DeepEqual(scannedData, expectedData) {
 		t.Fatalf("failed to load: loaded data: %v expected data: %v", scannedData, expectedData)
 	}
+}
+
+func TestKVDBLoadingWithLastEmptyFile(t *testing.T) {
+	helpers.CleanDB(helpers.DbPath)
+	data := map[string]string{
+		"0000000001.jlog": `
+{"lsn":1,"op":"set","time":1750280676,"record":{"tag":"users","key":"Alice-1","value":{"name":"Alice-1","age":1}}}`,
+		"0000000002.jlog": "",
+	}
+
+	if err := helpers.SetupDataFiles(helpers.DbPath, data); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	db, err := helpers.SetupDB(helpers.DbPath, false)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	_, err = helpers.SetupDB(helpers.DbPath, false)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
 }

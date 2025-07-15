@@ -33,6 +33,28 @@ func CleanDB(path string) error {
 	return nil
 }
 
+func SetupDataFiles(dbPath string, data map[string]string) error {
+	if err := os.MkdirAll(dbPath, 0755); err != nil {
+		return fmt.Errorf("failed to setup data: failed to create dir %v", err)
+	}
+	for fileName, content := range data {
+		filePath := fmt.Sprintf("%s/%s", dbPath, fileName)
+		fh, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to setup data: can not open file %v", err)
+		}
+
+		if _, err := fh.Write([]byte(content)); err != nil {
+			return fmt.Errorf("failed to setup data: can not write to file %v", err)
+		}
+
+		if err := fh.Close(); err != nil {
+			return fmt.Errorf("failed to setup data: can not close file %v", err)
+		}
+	}
+	return nil
+}
+
 type Action func() error
 
 func RunInParallel(actions []Action) error {
