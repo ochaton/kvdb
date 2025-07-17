@@ -114,8 +114,7 @@ func (s *Space) Del(key []byte) error {
 
 func (s *Space) Iter() SpaceIterator {
 	iter := s.tree.Iter()
-	iter.First()
-	return SpaceIterator{iter, false}
+	return SpaceIterator{iter, !iter.First()}
 }
 
 /******************************************************************************
