@@ -85,7 +85,7 @@ func TestKVDBSnapshoting(t *testing.T) {
 			}
 		}
 	}
-	// if err := helpers.CleanDB(helpers.DbPath); err != nil {
-	// 	t.Fatalf("%v", err)
-	// }
+	if err := helpers.CleanDB(helpers.DbPath); err != nil {
+		t.Fatalf("%v", err)
+	}
 }

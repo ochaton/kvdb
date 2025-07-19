@@ -8,7 +8,7 @@ type T struct {
 	mu     sync.RWMutex
 	spaces map[string]Space
 	closed bool
-	wr     *writer
+	wr     writer
 }
 
 type GetSpace func(name string) *Space

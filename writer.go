@@ -25,7 +25,16 @@ const (
 	closed
 )
 
-type writer struct {
+type writer interface {
+	Load(applyTxn func(*operation) (uint64, error)) error
+	Start() error
+	Close() error
+	Write(op *operation) error
+	Rotate() error
+	Snapshot(snap *map[string]Space) error
+}
+
+type defaultWriter struct {
 	lsn      *atomic.Uint64
 	dir      string
 	file     *os.File
@@ -36,8 +45,8 @@ type writer struct {
 }
 
 // NewWriter creates a new writer
-func newWriter(path string) *writer {
-	return &writer{
+func newWriter(path string) *defaultWriter {
+	return &defaultWriter{
 		status: created,
 		dir:    path,
 		mu:     sync.RWMutex{},
@@ -46,7 +55,7 @@ func newWriter(path string) *writer {
 
 // Load all data files from the directory and apply them to the given function
 // Sets LSN of the last applied operation to writer
-func (w *writer) Load(applyTxn func(*operation) (uint64, error)) error {
+func (w *defaultWriter) Load(applyTxn func(*operation) (uint64, error)) error {
 	if err := os.MkdirAll(w.dir, 0755); err != nil {
 		return err
 	}
@@ -72,7 +81,7 @@ func (w *writer) Load(applyTxn func(*operation) (uint64, error)) error {
 
 // Start writer
 // no locks - already under DB lock
-func (w *writer) Start() error {
+func (w *defaultWriter) Start() error {
 	if err := w.rotate(); err != nil {
 		return err
 	}
@@ -88,7 +97,7 @@ func (w *writer) Start() error {
 }
 
 // Close writer
-func (w *writer) Close() error {
+func (w *defaultWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.status == closed {
@@ -108,17 +117,17 @@ func (w *writer) Close() error {
 }
 
 // Request writer to write operation into jlog
-func (w *writer) Write(op *operation) error {
+func (w *defaultWriter) Write(op *operation) error {
 	return w.send(newWriteTask(op))
 }
 
 // Request writer to rotate current jlog file
-func (w *writer) Rotate() error {
+func (w *defaultWriter) Rotate() error {
 	return w.send(newRotateTask())
 }
 
 // Request writer to snap jlogs
-func (w *writer) Snapshot(snap *map[string]Space) error {
+func (w *defaultWriter) Snapshot(snap *map[string]Space) error {
 	return w.send(newSnapshotTask(snap))
 }
 
@@ -126,7 +135,7 @@ func (w *writer) Snapshot(snap *map[string]Space) error {
  * inner background operations
  */
 
-func (w *writer) work() {
+func (w *defaultWriter) work() {
 	w.mu.Lock()
 	if w.status != running {
 		return
@@ -157,7 +166,7 @@ func (w *writer) work() {
  * inner snapshot operation
  */
 
-func (w *writer) snapshot(task *taskSnapshot) error {
+func (w *defaultWriter) snapshot(task *taskSnapshot) error {
 	if err := w.rotate(); err != nil {
 		task.SendToCallback(err)
 		return err
@@ -171,7 +180,7 @@ func (w *writer) snapshot(task *taskSnapshot) error {
 	return nil
 }
 
-func (w *writer) snapBackground(task *taskSnapshot, lsn uint64) {
+func (w *defaultWriter) snapBackground(task *taskSnapshot, lsn uint64) {
 	// clean old inprogress files
 	if err := w.removeOrphanFiles(); err != nil {
 		task.SendToCallback(err)
@@ -230,7 +239,7 @@ func (w *writer) snapBackground(task *taskSnapshot, lsn uint64) {
  * inner rotate operation
  */
 
-func (w *writer) rotate() error {
+func (w *defaultWriter) rotate() error {
 	nextFileName := fmt.Sprintf("%s/%s.%s", w.dir, lsn2str(w.getLSN()+1), JLOG_EXTENSION)
 	if w.file != nil {
 		if nextFileName == w.file.Name() {
@@ -269,7 +278,7 @@ func (w *writer) rotate() error {
  * inner base operation
  */
 
-func (w *writer) write(op *operation) error {
+func (w *defaultWriter) write(op *operation) error {
 	if op == nil {
 		return nil
 	}
@@ -285,7 +294,7 @@ func (w *writer) write(op *operation) error {
 }
 
 // Send message to the writer
-func (w *writer) send(task task) error {
+func (w *defaultWriter) send(task task) error {
 	w.mu.RLock()
 	if w.status != running {
 		w.mu.RUnlock()
@@ -297,7 +306,7 @@ func (w *writer) send(task task) error {
 	return task.Wait()
 }
 
-func (w *writer) setLSN(lsn uint64) {
+func (w *defaultWriter) setLSN(lsn uint64) {
 	if w.lsn == nil {
 		w.lsn = &atomic.Uint64{}
 	}
@@ -311,7 +320,7 @@ func (w *writer) setLSN(lsn uint64) {
 	}
 }
 
-func (w *writer) getLSN() uint64 {
+func (w *defaultWriter) getLSN() uint64 {
 	if w.lsn == nil {
 		return 0
 	}
@@ -319,7 +328,7 @@ func (w *writer) getLSN() uint64 {
 	return lsn
 }
 
-func (w *writer) listActualDataFiles() ([]string, error) {
+func (w *defaultWriter) listActualDataFiles() ([]string, error) {
 	result := []string{}
 	filePathes, err := listDataFiles(w.dir, []string{SNAP_EXTENSION, JLOG_EXTENSION})
 	if err != nil {
@@ -361,7 +370,7 @@ func (w *writer) listActualDataFiles() ([]string, error) {
 	return result, nil
 }
 
-func (w *writer) removeOldDataFiles(lsn uint64) error {
+func (w *defaultWriter) removeOldDataFiles(lsn uint64) error {
 	filePathes, err := listDataFiles(w.dir, []string{SNAP_EXTENSION, JLOG_EXTENSION})
 	if err != nil {
 		return err
@@ -390,7 +399,7 @@ func (w *writer) removeOldDataFiles(lsn uint64) error {
 	return nil
 }
 
-func (w *writer) removeOrphanFiles() error {
+func (w *defaultWriter) removeOrphanFiles() error {
 	filePathes, err := listDataFiles(w.dir, []string{INPROGRESS_EXTENSION})
 	if err != nil {
 		return err

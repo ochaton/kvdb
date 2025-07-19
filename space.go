@@ -2,7 +2,6 @@ package kvdb
 
 import (
 	"bytes"
-	"errors"
 	"reflect"
 
 	"github.com/tidwall/btree"
@@ -11,10 +10,10 @@ import (
 type Space struct {
 	name *string
 	tree *btree.BTreeG[*record]
-	wr   *writer
+	wr   writer
 }
 
-func newSpace(name string, wr *writer) Space {
+func newSpace(name string, wr writer) Space {
 	return Space{
 		name: &name,
 		tree: btree.NewBTreeG(func(a, b *record) bool {
@@ -74,6 +73,29 @@ func (s *Space) Get(key []byte, into any) error {
 		return rec.into(into)
 	}
 	return ErrNotFound
+}
+
+func (s *Space) List(into any) error {
+	intoValue := reflect.ValueOf(into)
+	if intoValue.Kind() != reflect.Ptr || intoValue.Elem().Kind() != reflect.Slice {
+		return ErrIntoInvalidPointer
+	}
+	slice := intoValue.Elem()
+	elemType := slice.Type().Elem()
+
+	iter := s.Iter()
+	defer iter.Release()
+
+	for iter.HasNext() {
+		elemPtr := reflect.New(elemType)
+		if err := iter.Next(elemPtr.Interface()); err != nil {
+			return err
+		}
+		slice = reflect.Append(slice, elemPtr.Elem())
+
+	}
+	intoValue.Elem().Set(slice)
+	return nil
 }
 
 func (s *Space) Set(key []byte, value any) error {
@@ -199,7 +221,7 @@ func (sIt *SpaceIterator) Next(into any) error {
 	if record := sIt.next(); record != nil {
 		return record.into(into)
 	}
-	return errors.New("no next value")
+	return ErrIteratorNoNextValue
 }
 
 func (sIt *SpaceIterator) collectNext(size int) []*record {

@@ -66,6 +66,13 @@ func (r *record) UnmarshalJSON(data []byte) error {
 }
 
 func (r *record) into(into any) error {
+	/* TODO: return after creating schema
+	if reflect.TypeOf(r.Value) != reflect.ValueOf(into).Elem().Type() {
+		fmt.Printf("%v and %v\n", reflect.TypeOf(r.Value), reflect.ValueOf(into).Elem().Type())
+		return ErrIntoInvalidType
+	}
+	*/
+
 	buf := bufPool.Get().(*bytes.Buffer)
 	defer bufPool.Put(buf)
 
