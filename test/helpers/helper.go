@@ -13,7 +13,7 @@ const (
 	DbPath = ".kvdb"
 )
 
-func SetupDB(path string, withClean bool) (*kvdb.T, error) {
+func SetupDB(path string, withClean bool) (*kvdb.DB, error) {
 	if withClean {
 		if err := CleanDB(path); err != nil {
 			return nil, err
@@ -26,6 +26,27 @@ func SetupDB(path string, withClean bool) (*kvdb.T, error) {
 	return db, nil
 }
 
+func SetupDBWithData(path string, data map[string]string) (*kvdb.DB, error) {
+	if err := CleanDB(path); err != nil {
+		return nil, err
+	}
+	if err := SetupDataFiles(path, data); err != nil {
+		return nil, err
+	}
+	db, err := SetupDB(path, false)
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+func StopDBWithClean(db *kvdb.DB) error {
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("failed to close db: %v", err)
+	}
+	return CleanDB(db.GetPath())
+}
+
 func CleanDB(path string) error {
 	if err := os.RemoveAll(path); err != nil {
 		return fmt.Errorf("failed to clean db: %v", err)
@@ -33,26 +54,17 @@ func CleanDB(path string) error {
 	return nil
 }
 
-func SetupDataFiles(dbPath string, data map[string]string) error {
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
-		return fmt.Errorf("failed to setup data: failed to create dir %v", err)
+func GetSpaceData[T any](db *kvdb.DB, spaceName string) ([]T, error) {
+	var scannedData []T
+	err := db.View(func(exec kvdb.Executer) (err error) {
+		sp := kvdb.GetSpace[T](exec, spaceName)
+		scannedData, err = sp.List().Collect()
+		return err
+	})
+	if err != nil {
+		return []T{}, fmt.Errorf("failed to view: %v", err)
 	}
-	for fileName, content := range data {
-		filePath := fmt.Sprintf("%s/%s", dbPath, fileName)
-		fh, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to setup data: can not open file %v", err)
-		}
-
-		if _, err := fh.Write([]byte(content)); err != nil {
-			return fmt.Errorf("failed to setup data: can not write to file %v", err)
-		}
-
-		if err := fh.Close(); err != nil {
-			return fmt.Errorf("failed to setup data: can not close file %v", err)
-		}
-	}
-	return nil
+	return scannedData, nil
 }
 
 type Action func() error
@@ -84,42 +96,4 @@ func RunInParallel(actions []Action) error {
 	}
 
 	return err
-}
-
-type TestUser struct {
-	Name string `json:"name"`
-	Age  int    `json:"age"`
-}
-
-type UniqueDataGenerator struct {
-	curr int
-}
-
-func (gen *UniqueDataGenerator) Create(count int) []TestUser {
-	users := make([]TestUser, 0, count)
-	for range count {
-		gen.curr += 1
-		users = append(users, TestUser{
-			Name: fmt.Sprintf("Alice-%d", gen.curr),
-			Age:  gen.curr,
-		})
-	}
-	gen.curr++
-	return users
-}
-
-func (gen *UniqueDataGenerator) Change(item *TestUser) {
-	item.Age = gen.curr
-	gen.curr++
-}
-
-func Compare(existed, expected TestUser) bool {
-	return existed.Name == expected.Name && existed.Age == expected.Age
-}
-
-func Merge(arr1, arr2 []TestUser) []TestUser {
-	common := make([]TestUser, 0, len(arr1)+len(arr2))
-	common = append(common, arr1...)
-	common = append(common, arr2...)
-	return common
 }

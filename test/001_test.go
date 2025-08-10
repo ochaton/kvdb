@@ -1,12 +1,10 @@
 package main_test
 
 import (
-	"fmt"
-	"log"
-	"strconv"
-	"sync"
+	"reflect"
 	"testing"
 
+	"github.com/ochaton/kvdb"
 	"github.com/ochaton/kvdb/test/helpers"
 )
 
@@ -16,169 +14,67 @@ func TestKVDB(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 
-	users, err := db.NewSpace("users")
-	if err != nil {
-		t.Fatalf("failed to create space users: %v", err)
-	}
-	alice := helpers.TestUser{Name: "Alice", Age: 30}
+	sp := kvdb.GetSpace[helpers.TestUser](db, "users")
+	factory := helpers.NewFactory(helpers.TestUser{}, helpers.NewTestUser)
+	user := factory.One()
 
-	if err := users.Set([]byte(alice.Name), alice); err != nil {
+	if err := sp.Set(user.Key(), user); err != nil {
 		t.Fatalf("failed to set user: %v", err)
 	}
-
-	var ret helpers.TestUser
-	if err := users.Get([]byte(alice.Name), &ret); err != nil {
+	ret, err := sp.Get(user.Key())
+	if err != nil {
 		t.Fatalf("failed to get user: %v", err)
 	}
-
-	if ret.Name != alice.Name || ret.Age != alice.Age {
-		t.Fatalf("got %v, want %v", ret, alice)
+	if !reflect.DeepEqual(ret, user) {
+		t.Fatalf("failed to compare: got %v, want %v", ret, user)
 	}
 
-	// Check that mutation of ret does not affect the original
-	ret.Age = 31
-	if err := users.Get([]byte(alice.Name), &ret); err != nil {
-		t.Fatalf("failed to get user: %v", err)
-	}
-	if ret.Age == 31 {
-		t.Fatalf("got %v, want %v", ret.Age, alice.Age)
-	}
-
-	// check that any mutation of alice does not affect the original
-	prevAliceAge := alice.Age
-	alice.Age = 32
-	if err := users.Get([]byte(alice.Name), &ret); err != nil {
-		t.Fatalf("failed to get user: %v", err)
-	}
-	if ret.Age != prevAliceAge {
-		t.Fatalf("got %v, want %v", ret.Age, prevAliceAge)
+	if err := helpers.StopDBWithClean(db); err != nil {
+		t.Fatalf("%v", err)
 	}
 }
 
-func TestKVDBConcurrent(t *testing.T) {
+func TestKVDBMulti(t *testing.T) {
 	db, err := helpers.SetupDB(helpers.DbPath, true)
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
 
-	users, err := db.NewSpace("users")
-	if err != nil {
-		t.Fatalf("failed to create space users: %v", err)
-	}
-	alice := helpers.TestUser{Name: "Alice", Age: 30}
-	bob := helpers.TestUser{Name: "Bob", Age: 28}
+	factory := helpers.NewFactory(helpers.TestUser{}, helpers.NewTestUser)
+	expectedData := factory.Generate(3)
+	scannedData := make([]helpers.TestUser, 0)
 
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
-	errs := make(chan error, 2)
-
-	go func() {
-		var err error
-		defer wg.Done()
-		defer func() {
-			log.Printf("errs < err (1): %v", err)
-			errs <- err
-		}()
-
-		if err = users.Set([]byte(alice.Name), alice); err != nil {
-			err = fmt.Errorf("failed to set user: %v", err)
-			return
-		}
-		var ret helpers.TestUser
-		if err = users.Get([]byte(alice.Name), &ret); err != nil {
-			err = fmt.Errorf("failed to get user: %v", err)
-			return
-		}
-		if ret.Name != alice.Name || ret.Age != alice.Age {
-			err = fmt.Errorf("got %v, want %v", ret, alice)
-			return
-		}
-	}()
-
-	go func() {
-		var err error
-		defer wg.Done()
-		defer func() {
-			log.Printf("errs < err (2): %v", err)
-			errs <- err
-		}()
-		if err = users.Set([]byte(bob.Name), bob); err != nil {
-			err = fmt.Errorf("failed to set user: %v", err)
-			return
-		}
-		var ret helpers.TestUser
-		if err = users.Get([]byte(bob.Name), &ret); err != nil {
-			err = fmt.Errorf("failed to get user: %v", err)
-			return
-		}
-		if ret.Name != bob.Name || ret.Age != bob.Age {
-			err = fmt.Errorf("got %v, want %v", ret, bob)
-			return
-		}
-	}()
-
-	wg.Wait()
-	limit := 2
-	for limit > 0 {
-		err := <-errs
-		if err != nil {
-			t.Error(err)
-		}
-		limit--
-	}
-
-	// Check that Bob and Alice are in the database
-	var retAlice, retBob helpers.TestUser
-	if err := users.Get([]byte(alice.Name), &retAlice); err != nil {
-		t.Fatalf("failed to get user: %v", err)
-	}
-	if err := users.Get([]byte(bob.Name), &retBob); err != nil {
-		t.Fatalf("failed to get user: %v", err)
-	}
-	if retAlice.Name != alice.Name || retAlice.Age != alice.Age {
-		t.Fatalf("got %v, want %v", retAlice, alice)
-	}
-	if retBob.Name != bob.Name || retBob.Age != bob.Age {
-		t.Fatalf("got %v, want %v", retBob, bob)
-	}
-}
-
-type Metric struct {
-	Name  []byte `json:"name"`
-	Time  int64  `json:"time"`
-	Value int64  `json:"value"`
-}
-
-func (m *Metric) Key() []byte {
-	s := strconv.Itoa(int(m.Time))
-	return append(m.Name, []byte(s)...)
-}
-
-func BenchmarkWrite(b *testing.B) {
-	db, err := helpers.SetupDB(helpers.DbPath, true)
-	if err != nil {
-		b.Fatalf("%v", err)
-	}
-
-	metrics, err := db.NewSpace("metrics")
-	if err != nil {
-		b.Fatalf("failed to create space metrics: %v", err)
-	}
-	time := int64(0)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	b.RunParallel(func(p *testing.PB) {
-		var m Metric
-		k := []byte("metric")
-		for p.Next() {
-			time++
-			m.Time = time
-			m.Value = time
-			m.Name = k
-			if err := metrics.Set(m.Key(), m); err != nil {
-				b.Fatalf("failed to set metric: %v", err)
+	err = db.Update(func(exec kvdb.Executer) error {
+		sp := kvdb.GetSpace[helpers.TestUser](exec, "users")
+		for _, user := range expectedData {
+			if err := sp.Set(user.Key(), user); err != nil {
+				return err
 			}
 		}
+		return nil
 	})
+	if err != nil {
+		t.Fatalf("failed to update: %v", err)
+	}
+	err = db.View(func(exec kvdb.Executer) error {
+		sp := kvdb.GetSpace[helpers.TestUser](exec, "users")
+		for _, user := range expectedData {
+			ret, err := sp.Get(user.Key())
+			if err != nil {
+				return err
+			}
+			scannedData = append(scannedData, ret)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to view: %v", err)
+	}
+	if !reflect.DeepEqual(scannedData, expectedData) {
+		t.Fatalf("failed to compare: got '%v' expected '%v'", scannedData, expectedData)
+	}
+
+	if err := helpers.StopDBWithClean(db); err != nil {
+		t.Fatalf("%v", err)
+	}
 }

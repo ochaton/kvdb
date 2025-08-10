@@ -1,4 +1,4 @@
-package kvdb
+package record
 
 import (
 	"bytes"
@@ -20,15 +20,23 @@ var bufPool = &sync.Pool{
 }
 
 // record represents a single record in the btree
-type record struct {
+type Record struct {
 	LSN   uint64 `json:"-"`
 	Time  int64  `json:"-"` // unix timestamp
+	Space string `json:"space"`
 	Key   []byte `json:"key"`
-	Tag   string `json:"tag"`
 	Value any    `json:"value"`
 }
 
-func (r *record) MarshalJSON() ([]byte, error) {
+func NewRecord(space string, key []byte, value any) *Record {
+	return &Record{
+		Key:   key,
+		Value: value,
+		Space: space,
+	}
+}
+
+func (r *Record) MarshalJSON() ([]byte, error) {
 	v, err := json.Marshal(r.Value)
 	if err != nil {
 		return nil, err
@@ -38,7 +46,7 @@ func (r *record) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 
-	s := []byte(`{"tag":"` + r.Tag + `","key":`)
+	s := []byte(`{"space":"` + r.Space + `","key":`)
 	s = append(s, k...)
 	s = append(s, `,"value":`...)
 	s = append(s, v...)
@@ -47,10 +55,10 @@ func (r *record) MarshalJSON() ([]byte, error) {
 	return s, nil
 }
 
-func (r *record) UnmarshalJSON(data []byte) error {
+func (r *Record) UnmarshalJSON(data []byte) error {
 	var tmp struct {
+		Space string `json:"space"`
 		Key   string `json:"key"`
-		Tag   string `json:"tag"`
 		Value any    `json:"value"`
 	}
 
@@ -58,14 +66,14 @@ func (r *record) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	r.Space = tmp.Space
 	r.Key = []byte(tmp.Key)
-	r.Tag = tmp.Tag
 	r.Value = tmp.Value
 
 	return nil
 }
 
-func (r *record) into(into any) error {
+func (r *Record) Into(into any) error {
 	/* TODO: return after creating schema
 	if reflect.TypeOf(r.Value) != reflect.ValueOf(into).Elem().Type() {
 		fmt.Printf("%v and %v\n", reflect.TypeOf(r.Value), reflect.ValueOf(into).Elem().Type())

@@ -1,4 +1,4 @@
-package kvdb
+package processor
 
 import (
 	"fmt"

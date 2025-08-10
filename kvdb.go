@@ -2,131 +2,113 @@ package kvdb
 
 import (
 	"sync"
+
+	"github.com/ochaton/kvdb/locks"
+	"github.com/ochaton/kvdb/writer"
+	"github.com/ochaton/kvdb/writer/operation"
 )
 
-type T struct {
-	mu     sync.RWMutex
-	spaces map[string]Space
-	closed bool
-	wr     writer
+type DB struct {
+	path          string
+	closed        bool
+	memoryStorage *memoryStorage
+	lockManager   *locks.LockManager
+	writer        writer.Writer
+	mu            sync.RWMutex
 }
-
-type GetSpace func(name string) *Space
-type applyTxnFunc func(txn *operation) (uint64, error)
 
 // Open opens a new database at the given path.
 // If the database does not exist, it will be created.
-func Open(path string) (*T, error) {
-	db := &T{}
-	db.spaces = make(map[string]Space)
+func Open(path string) (*DB, error) {
+	db := &DB{
+		path:          path,
+		memoryStorage: newMemoryStorage(),
+		lockManager:   locks.NewLockManager(),
+		writer:        writer.NewWriter(path),
+		mu:            sync.RWMutex{},
+	}
 
-	var err error
-
-	db.wr = newWriter(path)
-
-	if err = db.wr.Load(db.applyTxn); err != nil {
+	if err := db.writer.Load(db.applyTxn); err != nil {
 		return nil, err
 	}
 
-	if err = db.wr.Start(); err != nil {
-		_ = db.wr.Close()
+	if err := db.writer.Start(); err != nil {
+		_ = db.writer.Close()
 		return nil, err
 	}
 
 	return db, nil
 }
 
-// Space returns the space with the given name.
-// If the space does not exist, it returns nil.
-func (db *T) Space(name string) (*Space, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	if db.closed {
-		return nil, ErrClosed
-	}
-	return db.space(name, false), nil
-}
-
-// NewSpace creates a new space with the given name.
-// or returns the existing space if it already exists.
-func (db *T) NewSpace(name string) (*Space, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	if db.closed {
-		return nil, ErrClosed
-	}
-	return db.space(name, true), nil
-}
-
-func (db *T) Snapshot() error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	if db.closed {
-		return ErrClosed
-	}
-
-	spaces := map[string]Space{}
-	for name, space := range db.spaces {
-		spaces[name] = space.View()
-	}
-
-	// Send to do snapshot
-	db.wr.Snapshot(&spaces)
-
-	return nil
-}
-
-func (db *T) Update(txn func(f GetSpace) error) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	if db.closed {
-		return ErrClosed
-	}
-	return txn(db.getSpaceInner)
-}
-
-func (db *T) View(txn func(f GetSpace) error) error {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	if db.closed {
-		return ErrClosed
-	}
-	return txn(db.getSpaceInner)
-}
-
 // Close closes the database and releases all resources.
-func (db *T) Close() (err error) {
+func (db *DB) Close() (err error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-
 	if db.closed {
 		return ErrClosed
 	}
-	err = db.wr.Close()
+	err = db.writer.Close()
 	db.closed = true
-	db.spaces = nil
+	db.memoryStorage = nil
 	return
 }
 
+func (db *DB) Snapshot() error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return ErrClosed
+	}
+
+	return db.writer.Snapshot(db.memoryStorage.newSnapshot())
+}
+
+func (db *DB) Update(fn func(exec Executer) error) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed {
+		return ErrClosed
+	}
+	return fn(db)
+}
+
+func (db *DB) View(fn func(exec Executer) error) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return ErrClosed
+	}
+	return fn(db)
+}
+
+func (db *DB) Tx(fn func(exec Executer) error) error {
+	db.mu.RLock()
+	if db.closed {
+		db.mu.RUnlock()
+		return ErrClosed
+	}
+	db.mu.RUnlock()
+	txExec := NewTXExecuter(db, db.lockManager)
+	err := fn(txExec)
+	if err != nil {
+		txExec.Rollback()
+		return err
+	}
+	return txExec.Commit()
+}
+
 // called only on load, so we dont need additional locks
-func (db *T) applyTxn(txn *operation) (uint64, error) {
+func (db *DB) applyTxn(txn *operation.Operation) (uint64, error) {
 	txn.Record.LSN = txn.LSN
+	txn.Record.Time = txn.Time
 	switch txn.Op {
-	case OPERATION_SET:
-		space := db.space(txn.Record.Tag, true)
-		if _, err := space.treeSet(txn.Record); err != nil {
+	case operation.OPERATION_SET:
+		if _, err := db.memoryStorage.set(txn.Record); err != nil {
 			return 0, err
 		}
-	case OPERATION_DEL:
-		if space := db.space(txn.Record.Tag, false); space != nil {
-			if _, err := space.treeDel(txn.Record); err != nil {
-				return 0, err
-			}
+	case operation.OPERATION_DEL:
+		if _, err := db.memoryStorage.del(txn.Record); err != nil {
+			return 0, err
 		}
 	default:
 		return 0, ErrOperationUnknownType
@@ -135,18 +117,10 @@ func (db *T) applyTxn(txn *operation) (uint64, error) {
 	return txn.LSN, nil
 }
 
-func (db *T) space(name string, create bool) *Space {
-	if sp, ok := db.spaces[name]; ok {
-		return &sp
-	}
-	if !create {
-		return nil
-	}
-	sp := newSpace(name, db.wr)
-	db.spaces[name] = sp
-	return &sp
+func (db *DB) GetPath() string {
+	return db.path
 }
 
-func (db *T) getSpaceInner(name string) *Space {
-	return db.space(name, false)
+func GetSpace[T any](exec Executer, name string) *Space[T] {
+	return newSpace[T](name, exec)
 }
