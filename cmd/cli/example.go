@@ -28,7 +28,7 @@ func main() {
 	bob := User{Name: "Bob", Age: 28}
 
 	// Guarantee that the space is created
-	err = db.Update(func(exec kvdb.Executer) (err error) {
+	err = db.Tx(func(exec kvdb.Executer) (err error) {
 		sp := kvdb.GetSpace[User](exec, "users")
 
 		if err = sp.Set(bob.Key(), bob); err != nil {

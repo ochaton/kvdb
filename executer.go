@@ -6,11 +6,11 @@ import (
 )
 
 type Executer interface {
-	Set(spaceName string, key []byte, value any) error
-	Del(spaceName string, key []byte) error
-	Get(spaceName string, key []byte) (*record.Record, bool)
-	Len(spaceName string) int
-	Stream(spaceName string) (chan *record.Record, error)
+	Set(space string, key []byte, value any) error
+	Del(space string, key []byte) error
+	Get(space string, key []byte) (*record.Record, error)
+	Len(space string) int
+	Stream(space string) (chan *record.Record, error)
 }
 
 /* default executor */
@@ -20,8 +20,9 @@ func (db *DB) Set(space string, key []byte, value any) error {
 	if err := db.writer.Write(op); err != nil {
 		return err
 	}
-
-	_, _ = db.memoryStorage.set(rec)
+	if err := db.memoryStorage.Set(rec); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -31,32 +32,38 @@ func (db *DB) Del(space string, key []byte) error {
 	if err := db.writer.Write(op); err != nil {
 		return err
 	}
-
-	_, _ = db.memoryStorage.del(rec)
+	if err := db.memoryStorage.Del(rec); err != nil {
+		return err
+	}
 	return nil
 }
 
-func (db *DB) Get(space string, key []byte) (*record.Record, bool) {
-	rec := record.NewRecord(space, key, nil)
-	return db.memoryStorage.get(rec)
+func (db *DB) Get(space string, key []byte) (*record.Record, error) {
+	if key == nil {
+		return nil, ErrKeyIsNil
+	}
+	rec, found := db.memoryStorage.Get(record.NewRecord(space, key, nil))
+	if !found {
+		return nil, ErrNotFound
+	}
+	return rec, nil
 }
 
 func (db *DB) Len(space string) int {
-	return db.memoryStorage.len(space)
+	return db.memoryStorage.Len(space)
 }
 
 func (db *DB) Stream(space string) (chan *record.Record, error) {
 	out := make(chan *record.Record)
-	iter, err := db.memoryStorage.iter(space)
+	iter, err := db.memoryStorage.Iter(space)
 	if err != nil {
 		return nil, err
 	}
-	if !iter.finished {
+	if !iter.IsFinished() {
 		go func(output chan *record.Record) {
 			defer close(output)
-			defer iter.release()
-			for iter.hasNext() {
-				output <- iter.next()
+			for iter.Scan() {
+				output <- iter.Item()
 			}
 		}(out)
 	} else {
@@ -70,12 +77,10 @@ func (db *DB) ModifyBatch(toDel, toSet []*record.Record) error {
 	ops := operation.NewEmptyOperationBatch()
 	ops.Add(toDel, operation.OPERATION_DEL)
 	ops.Add(toSet, operation.OPERATION_SET)
-
 	if err := db.writer.WriteBatch(ops); err != nil {
 		return err
 	}
-
-	if err := db.memoryStorage.modifyBatch(toDel, toSet); err != nil {
+	if err := db.memoryStorage.ModifyBatch(toDel, toSet); err != nil {
 		return err
 	}
 	return nil

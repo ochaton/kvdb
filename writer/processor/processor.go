@@ -13,6 +13,12 @@ import (
 	"github.com/ochaton/kvdb/writer/operation"
 )
 
+type ApplyOperationFn func(txn *operation.Operation) (uint64, error)
+
+/*
+Single thread processor.
+Should be protected with locks outside.
+*/
 type Processor struct {
 	dir  string
 	file *os.File
@@ -24,10 +30,10 @@ func NewProcessor(path string) *Processor {
 }
 
 func (proc *Processor) Close() error {
-	if proc.file == nil {
-		return nil
+	if proc.file != nil {
+		return closeFile(proc.file)
 	}
-	return closeFile(proc.file)
+	return nil
 }
 
 func (proc *Processor) setLSN(lsn uint64) {
@@ -86,7 +92,8 @@ func (proc *Processor) Rotate() error {
 }
 
 type Snapshot interface {
-	GetNext(count int) []*record.Record
+	IsFinished() bool
+	GetItems(count int) []*record.Record
 }
 
 func (proc *Processor) Snapshot(lsn uint64, snap Snapshot) error {
@@ -103,12 +110,11 @@ func (proc *Processor) Snapshot(lsn uint64, snap Snapshot) error {
 	}
 
 	// write data to new snapshot
-	for {
-		records := snap.GetNext(100)
+	for !snap.IsFinished() {
+		records := snap.GetItems(100)
 		if len(records) == 0 {
-			break
+			continue
 		}
-
 		ops := operation.NewOperationBatch(records, operation.OPERATION_SET)
 		err = writeManyTo(fh, ops)
 		if err != nil {
@@ -155,16 +161,17 @@ func (proc *Processor) Write(op *operation.Operation) error {
 		return nil
 	}
 	op.SetLSN(proc.GetLSN() + 1)
-
 	if err := writeTo(proc.file, op); err != nil {
 		return err
 	}
-
 	proc.setLSN(op.LSN)
 	return nil
 }
 
 func (proc *Processor) WriteBatch(ops *operation.OperationBatch) error {
+	if ops == nil {
+		return nil
+	}
 	newLSN := ops.SetLSN(proc.GetLSN() + 1)
 	if err := writeManyTo(proc.file, ops); err != nil {
 		return err
@@ -173,7 +180,7 @@ func (proc *Processor) WriteBatch(ops *operation.OperationBatch) error {
 	return nil
 }
 
-func (proc *Processor) Load(applyTxn func(txn *operation.Operation) (uint64, error)) error {
+func (proc *Processor) Load(applyOpFn ApplyOperationFn) error {
 	log.Printf("start loading")
 	if err := os.MkdirAll(proc.dir, 0755); err != nil {
 		return err
@@ -189,7 +196,7 @@ func (proc *Processor) Load(applyTxn func(txn *operation.Operation) (uint64, err
 	}
 
 	for _, filePath := range actualFilesPathes {
-		lsn, err := proc.loadDataFile(filePath, applyTxn)
+		lsn, err := proc.loadDataFile(filePath, applyOpFn)
 		if err != nil {
 			return err
 		}
@@ -201,10 +208,7 @@ func (proc *Processor) Load(applyTxn func(txn *operation.Operation) (uint64, err
 	return nil
 }
 
-func (proc *Processor) loadDataFile(
-	filePath string,
-	applyTxn func(txn *operation.Operation) (uint64, error),
-) (uint64, error) {
+func (proc *Processor) loadDataFile(filePath string, applyOpFn ApplyOperationFn) (uint64, error) {
 	fh, err := openFile(filePath, false)
 	if err != nil {
 		return 0, err
@@ -223,7 +227,7 @@ func (proc *Processor) loadDataFile(
 			}
 			return 0, err
 		}
-		lsn, err = applyTxn(&op)
+		lsn, err = applyOpFn(&op)
 		if err != nil {
 			return 0, err
 		}

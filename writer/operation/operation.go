@@ -125,7 +125,7 @@ func (ops *OperationBatch) ToBytes() ([]byte, error) {
 func (ops *OperationBatch) SetLSN(lsn uint64) uint64 {
 	for i := range len(ops.inner) {
 		ops.inner[i].SetLSN(lsn)
-		if i != len(ops.inner) {
+		if i != len(ops.inner)-1 {
 			lsn++
 		}
 	}

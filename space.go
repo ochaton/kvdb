@@ -22,9 +22,9 @@ func (s *Space[T]) Get(key []byte) (T, error) {
 		return item, ErrKeyIsNil
 	}
 
-	rec, found := s.exec.Get(s.name, key)
-	if !found {
-		return item, ErrNotFound
+	rec, err := s.exec.Get(s.name, key)
+	if err != nil {
+		return item, err
 	}
 	if err := rec.Into(&item); err != nil {
 		return item, err

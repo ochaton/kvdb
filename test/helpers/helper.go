@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/ochaton/kvdb"
 )
@@ -56,11 +57,8 @@ func CleanDB(path string) error {
 
 func GetSpaceData[T any](db *kvdb.DB, spaceName string) ([]T, error) {
 	var scannedData []T
-	err := db.View(func(exec kvdb.Executer) (err error) {
-		sp := kvdb.GetSpace[T](exec, spaceName)
-		scannedData, err = sp.List().Collect()
-		return err
-	})
+	sp := kvdb.GetSpace[T](db, spaceName)
+	scannedData, err := sp.List().Collect()
 	if err != nil {
 		return []T{}, fmt.Errorf("failed to view: %v", err)
 	}
@@ -96,4 +94,37 @@ func RunInParallel(actions []Action) error {
 	}
 
 	return err
+}
+
+type OrderChans struct {
+	inner []chan struct{}
+}
+
+func NewOrderChans(count int) *OrderChans {
+	inner := make([]chan struct{}, 0)
+	for range count {
+		inner = append(inner, make(chan struct{}, 1))
+	}
+	return &OrderChans{inner: inner}
+}
+
+func (oc *OrderChans) Run(order int) {
+	oc.inner[order] <- struct{}{}
+}
+
+func (oc *OrderChans) WaitWithTimeout(order int, timeout time.Duration) {
+	select {
+	case <-oc.inner[order]:
+	case <-time.After(timeout):
+	}
+}
+
+func (oc *OrderChans) Wait(order int) {
+	<-oc.inner[order]
+}
+
+func (oc *OrderChans) Release() {
+	for _, ch := range oc.inner {
+		close(ch)
+	}
 }

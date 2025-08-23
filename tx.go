@@ -43,41 +43,45 @@ type TxExecter struct {
 	defaultExec    *DB
 	modified       *btree.BTreeG[*txOperation]
 	itemsCountDiff int
-	lockManager    *locks.LockManager
+	lockManager    locks.LockManager
 }
 
-func NewTXExecuter(defaultExec *DB, lockManager *locks.LockManager) *TxExecter {
+func NewTXExecuter(db *DB) *TxExecter {
 	return &TxExecter{
 		ID:          uuid.New().String(),
-		defaultExec: defaultExec,
+		defaultExec: db,
 		modified: btree.NewBTreeG(func(a, b *txOperation) bool {
 			if a.record.Space != b.record.Space {
 				return a.record.Space < b.record.Space
 			}
 			return bytes.Compare(a.record.Key, b.record.Key) < 0
 		}),
-		lockManager: lockManager,
+		lockManager: db.lockManager,
 	}
 }
 
-func (tx *TxExecter) SetCounters(spaceName string, key []byte) {
-}
-
-func (tx *TxExecter) isNewRecord(op *txOperation) bool {
+func (tx *TxExecter) isNewRecord(op *txOperation) (bool, error) {
 	if oldTxOp, found := tx.modified.Get(op); found {
-		return oldTxOp.op == TX_OPERATION_INSERT
+		return oldTxOp.op == TX_OPERATION_INSERT, nil
 	}
-	if _, found := tx.defaultExec.Get(op.record.Space, op.record.Key); found {
-		return false
+	if _, err := tx.defaultExec.Get(op.record.Space, op.record.Key); err != nil {
+		if err == ErrNotFound {
+			return true, nil
+		}
+		return false, err
 	}
-	return true
+	return false, nil
 }
 
 func (tx *TxExecter) Set(spaceName string, key []byte, value any) error {
-	tx.lockManager.LockItem(tx.ID, spaceName, key)
+	tx.lockManager.LockRecord(tx.ID, spaceName, key)
 
 	newTxOp := newTxOperation(TX_OPERATION_INSERT, record.NewRecord(spaceName, key, value))
-	if !tx.isNewRecord(newTxOp) {
+	isNew, err := tx.isNewRecord(newTxOp)
+	if err != nil {
+		return err
+	}
+	if !isNew {
 		newTxOp.op = TX_OPERATION_REPLACE
 	} else {
 		tx.itemsCountDiff++
@@ -88,10 +92,14 @@ func (tx *TxExecter) Set(spaceName string, key []byte, value any) error {
 }
 
 func (tx *TxExecter) Del(spaceName string, key []byte) error {
-	tx.lockManager.LockItem(tx.ID, spaceName, key)
+	tx.lockManager.LockRecord(tx.ID, spaceName, key)
 
 	newTxOp := newTxOperation(TX_OPERATION_DELETE, record.NewRecord(spaceName, key, nil))
-	if tx.isNewRecord(newTxOp) {
+	isNew, err := tx.isNewRecord(newTxOp)
+	if err != nil {
+		return err
+	}
+	if isNew {
 		tx.modified.Delete(newTxOp)
 		tx.itemsCountDiff--
 	} else {
@@ -100,14 +108,14 @@ func (tx *TxExecter) Del(spaceName string, key []byte) error {
 	return nil
 }
 
-func (tx *TxExecter) Get(spaceName string, key []byte) (*record.Record, bool) {
-	tx.lockManager.LockItem(tx.ID, spaceName, key)
+func (tx *TxExecter) Get(spaceName string, key []byte) (*record.Record, error) {
+	tx.lockManager.LockRecord(tx.ID, spaceName, key)
 	txOp, found := tx.modified.Get(newTxOperationAsKey(spaceName, key))
 	if found {
 		if txOp.op == TX_OPERATION_DELETE {
-			return nil, false
+			return nil, ErrNotFound
 		}
-		return txOp.record, true
+		return txOp.record, nil
 	}
 	return tx.defaultExec.Get(spaceName, key)
 }
@@ -120,39 +128,15 @@ func (tx *TxExecter) Len(spaceName string) int {
 
 func (tx *TxExecter) Stream(spaceName string) (chan *record.Record, error) {
 	tx.lockManager.LockSpace(tx.ID, spaceName)
-	// lock space
+
 	defaultCh, err := tx.defaultExec.Stream(spaceName)
 	if err != nil {
 		return nil, err
 	}
-	mergeCh := make(chan *record.Record)
 
 	if tx.modified.Len() > 0 {
-		go func(output chan *record.Record, sourceCh chan *record.Record) {
-			defer close(output)
-
-			var txOp *txOperation
-			var found bool
-			for item := range sourceCh {
-				txOp, found = tx.modified.Get(newTxOperationAsKey(item.Space, item.Key))
-				if found {
-					if txOp.op == TX_OPERATION_REPLACE {
-						output <- txOp.record
-					} else {
-						continue
-					}
-				}
-			}
-
-			iter := NewSpaceIterator(tx.modified)
-			defer iter.release()
-			for iter.hasNext() {
-				item := iter.next()
-				if item.op == TX_OPERATION_INSERT {
-					output <- item.record
-				}
-			}
-		}(mergeCh, defaultCh)
+		mergeCh := make(chan *record.Record)
+		go mergeChans(mergeCh, defaultCh, tx.modified)
 		return mergeCh, nil
 	}
 	return defaultCh, nil
@@ -187,4 +171,37 @@ func (tx *TxExecter) Rollback() error {
 	tx.modified = nil
 	tx.lockManager.UnLockAll(tx.ID)
 	return nil
+}
+
+func mergeChans(
+	output chan *record.Record,
+	sourceCh chan *record.Record,
+	modified *btree.BTreeG[*txOperation],
+) {
+	defer close(output)
+	var txOp *txOperation
+	var found bool
+	for item := range sourceCh {
+		txOp, found = modified.Get(newTxOperationAsKey(item.Space, item.Key))
+		if !found {
+			output <- item
+			continue
+		}
+		if txOp.op == TX_OPERATION_REPLACE {
+			output <- txOp.record
+		}
+	}
+	iter := modified.Iter()
+	defer iter.Release()
+	isOk := iter.First()
+	for isOk {
+		txOp = iter.Item()
+		if txOp == nil {
+			break
+		}
+		if txOp.op == TX_OPERATION_INSERT {
+			output <- txOp.record
+		}
+		isOk = iter.Next()
+	}
 }

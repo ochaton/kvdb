@@ -36,6 +36,12 @@ func ChangeTestUser(user TestUser, i int) TestUser {
 func (u *TestUser) Key() []byte {
 	return []byte(u.Name)
 }
+func (u *TestUser) Copy() TestUser {
+	return TestUser{
+		Name: u.Name,
+		Age:  u.Age,
+	}
+}
 
 type Metric struct {
 	Name  []byte `json:"name"`
@@ -90,11 +96,6 @@ func (factory *TestDataFactory[T]) Generate(count int) []T {
 	return data
 }
 
-// func (factory TestDataFactory[T]) Change(item T) (T, error) {
-// 	factory.currCount++
-// 	return factory.changer(item, factory.currCount), nil
-// }
-
 func Merge[T any](arr1 []T, arr2 []T) []T {
 	common := make([]T, 0, len(arr1)+len(arr2))
 	common = append(common, arr1...)
@@ -102,24 +103,10 @@ func Merge[T any](arr1 []T, arr2 []T) []T {
 	return common
 }
 
-// type UniqueDataGenerator[T any] struct {
-// 	curr int
-// }
-
-// func (gen *UniqueDataGenerator[T]) Create(count int) []T {
-// 	users := make([]T, 0, count)
-// 	for range count {
-// 		gen.curr += 1
-// 		users = append(users, TestUser{
-// 			Name: fmt.Sprintf("Alice-%d", gen.curr),
-// 			Age:  gen.curr,
-// 		})
-// 	}
-// 	gen.curr++
-// 	return users
-// }
-
-// func (gen *UniqueDataGenerator[T]) Change(item *TestUser) {
-// 	item.Age = gen.curr
-// 	gen.curr++
-// }
+func CopyTestUsers(arr []TestUser) []TestUser {
+	newD := make([]TestUser, 0, len(arr))
+	for _, item := range arr {
+		newD = append(newD, item.Copy())
+	}
+	return newD
+}

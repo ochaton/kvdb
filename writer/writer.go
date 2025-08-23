@@ -13,14 +13,16 @@ type status int
 const (
 	created status = iota
 	loaded
+	prerunning
 	running
-	closed
+	stopped
+	failed
 )
 
 type Writer interface {
+	Load(applyFn processor.ApplyOperationFn) error
 	Start() error
-	Close() error
-	Load(applyTxn func(txn *operation.Operation) (uint64, error)) error
+	Stop() error
 	Rotate() error
 	Snapshot(snap processor.Snapshot) error
 	Write(op *operation.Operation) error
@@ -43,7 +45,7 @@ func NewWriter(path string) *DefaultWriter {
 	}
 }
 
-func (w *DefaultWriter) Load(applyTxn func(txn *operation.Operation) (uint64, error)) error {
+func (w *DefaultWriter) Load(applyFn processor.ApplyOperationFn) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -51,7 +53,7 @@ func (w *DefaultWriter) Load(applyTxn func(txn *operation.Operation) (uint64, er
 		return ErrWriterInvalidStatus
 	}
 
-	if err := w.processor.Load(applyTxn); err != nil {
+	if err := w.processor.Load(applyFn); err != nil {
 		return err
 	}
 	w.status = loaded
@@ -59,11 +61,23 @@ func (w *DefaultWriter) Load(applyTxn func(txn *operation.Operation) (uint64, er
 }
 
 func (w *DefaultWriter) Start() error {
+	if err := w.PreStart(); err != nil {
+		return err
+	}
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go w.work(wg)
+	wg.Wait()
+
+	return nil
+}
+
+func (w *DefaultWriter) PreStart() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.status != loaded {
-		return ErrWriterInvalidStatus
+		return ErrWriterIsNotLoaded
 	}
 
 	if err := w.processor.Rotate(); err != nil {
@@ -71,21 +85,19 @@ func (w *DefaultWriter) Start() error {
 	}
 
 	w.incoming = make(chan task, 100)
-	w.status = running
-
-	go w.work()
+	w.status = prerunning
 	return nil
 }
 
-func (w *DefaultWriter) Close() error {
+func (w *DefaultWriter) Stop() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.status == closed {
-		return ErrWriterInvalidStatus
+	if w.status == stopped {
+		return ErrWriterAlreadyStopped
 	}
 
-	w.status = closed
+	w.status = stopped
 	if w.incoming != nil {
 		close(w.incoming)
 	}
@@ -112,14 +124,19 @@ func (w *DefaultWriter) WriteBatch(ops *operation.OperationBatch) error {
 	return w.send(newWriteBatchTask(ops))
 }
 
-func (w *DefaultWriter) work() {
+func (w *DefaultWriter) work(wg *sync.WaitGroup) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.mu.Lock()
+			w.status = failed
+			w.mu.Unlock()
+		}
+	}()
 	w.mu.Lock()
-	if w.status != running {
-		w.mu.Unlock()
-		return
-	}
 	w.done = make(chan error, 1)
+	w.status = running
 	w.mu.Unlock()
+	wg.Done()
 
 	for task := range w.incoming {
 		task.Do(w.processor)
@@ -136,7 +153,7 @@ func (w *DefaultWriter) send(t task) error {
 	w.mu.RLock()
 	if w.status != running {
 		w.mu.RUnlock()
-		return errors.New("writer worker is not running")
+		return ErrWriterIsNotRunning
 	}
 	w.incoming <- t
 	w.mu.RUnlock()
